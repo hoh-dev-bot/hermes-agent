@@ -5143,11 +5143,14 @@ def _client_cache_key(
     runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
     task_key = (task or "", _task_prefers_fast_model(task)) if provider == "auto" else ""
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
+    # Custom compression overrides inherit the main runtime's wire mode when no task mode is set;
+    # keep that mode in the key so a cached Responses adapter cannot serve a later chat request.
+    cache_api_mode = api_mode or (runtime.get("api_mode", "") if provider == "custom" else "")
     # Model MUST be in the key: concurrent calls to the same endpoint with different models would
     # share an entry, and the second builder's _store_cached_client would close the first's client.
     model_key = model or runtime.get("model", "")
     api_key_key = _runtime_cache_discriminator("api_key", api_key or "")
-    return (provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
+    return (provider, async_mode, base_url or "", api_key_key, cache_api_mode, runtime_key, is_vision, task_key, pool_hint, model_key)
 
 
 def _current_event_loop() -> Any:

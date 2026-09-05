@@ -434,6 +434,38 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert model == "gpt-5.6-luna"
         assert client._real_client is real_client
 
+    def test_custom_provider_main_runtime_mode_separates_cached_transport(self, monkeypatch):
+        """Changing the inherited main-runtime wire mode must not reuse a cached adapter."""
+        from agent.auxiliary_client import CodexAuxiliaryClient, _client_cache, _get_cached_client
+
+        real_client = MagicMock()
+        real_client.api_key = "***"
+        real_client.base_url = "https://tianji.example.test/v1"
+        monkeypatch.setattr(
+            "agent.auxiliary_client._create_openai_client",
+            lambda **_kwargs: real_client,
+        )
+        _client_cache.clear()
+        runtime = {
+            "provider": "custom",
+            "model": "gpt-5.6-luna",
+            "base_url": "https://tianji.example.test/v1",
+            "api_key": "***",
+        }
+
+        responses_client, _ = _get_cached_client(
+            "custom", model="gpt-5.6-luna", task="compression",
+            main_runtime={**runtime, "api_mode": "codex_responses"},
+        )
+        chat_client, _ = _get_cached_client(
+            "custom", model="gpt-5.6-luna", task="compression",
+            main_runtime={**runtime, "api_mode": "chat_completions"},
+        )
+
+        assert isinstance(responses_client, CodexAuxiliaryClient)
+        assert chat_client is real_client
+        assert chat_client is not responses_client
+
 
     def test_custom_provider_main_runtime_no_credentials_falls_through(self, tmp_path, monkeypatch):
         """When main_runtime has no base_url or no api_key, the existing
