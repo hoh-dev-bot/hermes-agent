@@ -6554,6 +6554,10 @@ def _prepare_aux_request(
     )
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
+    relay_api_mode = resolved_api_mode
+    if (not relay_api_mode and request_provider == "custom" and main_runtime.get("base_url")
+            and main_runtime.get("api_key")):
+        relay_api_mode = str(main_runtime.get("api_mode") or "") or None
     fast_compression_cap = None
     if not async_mode:
         compression_config = _get_auxiliary_task_config("compression") if task == "compression" else {}
@@ -6563,7 +6567,7 @@ def _prepare_aux_request(
             leak_guard_config=compression_config, max_tokens=max_tokens,
             extra_body=effective_extra_body,
         )
-    _set_relay_auxiliary_route(request_provider, final_model, resolved_api_mode)
+    _set_relay_auxiliary_route(request_provider, final_model, relay_api_mode)
     _record_route_info(route_info, _fallback_provider_from_label(request_provider), final_model)
     if async_mode:
         base_info = str(getattr(client, "base_url", "") or "")

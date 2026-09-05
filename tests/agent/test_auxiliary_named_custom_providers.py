@@ -466,6 +466,40 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert chat_client is real_client
         assert chat_client is not responses_client
 
+    def test_custom_provider_inherited_mode_reaches_relay_metadata(self, monkeypatch):
+        """The inherited mode must reach Relay's protocol/codec selection."""
+        import agent.auxiliary_client as auxiliary_client
+
+        runtime = {
+            "provider": "custom",
+            "model": "gpt-5.6-luna",
+            "base_url": "https://tianji.example.test/v1",
+            "api_key": "***",
+            "api_mode": "codex_responses",
+        }
+        client = MagicMock()
+        client.base_url = runtime["base_url"]
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_resolve_task_provider_model",
+            lambda *args, **kwargs: ("custom", "gpt-5.6-luna", None, None, None),
+        )
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_get_cached_client",
+            lambda *args, **kwargs: (client, "gpt-5.6-luna"),
+        )
+        with patch.object(auxiliary_client, "_set_relay_auxiliary_route") as set_route:
+            auxiliary_client._prepare_aux_request(
+                "title_generation", provider=None, model=None, base_url=None, api_key=None,
+                main_runtime=runtime, messages=[{"role": "user", "content": "x"}],
+                temperature=None, max_tokens=None, tools=None, timeout=None, extra_body=None,
+                reasoning_config=None, extra_headers=None, api_mode=None, route_info={},
+                async_mode=False,
+            )
+
+        assert set_route.call_args.args[2] == "codex_responses"
+
 
     def test_custom_provider_main_runtime_no_credentials_falls_through(self, tmp_path, monkeypatch):
         """When main_runtime has no base_url or no api_key, the existing
