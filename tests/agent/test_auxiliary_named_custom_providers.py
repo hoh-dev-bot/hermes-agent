@@ -559,3 +559,83 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert "explicit.example.com" in str(client.base_url)
         assert client.api_key == "sk-explicit"
         assert not isinstance(client, CodexAuxiliaryClient)
+
+    def test_automatic_compression_inherited_custom_responses_dispatches_stream(self, tmp_path, monkeypatch):
+        """Automatic compression must reach the inherited custom Responses wire."""
+        from types import SimpleNamespace
+
+        import agent.auxiliary_client as auxiliary_client
+        from agent.context_compressor import ContextCompressor
+
+        _write_config(tmp_path, {
+            "model": {"default": "gpt-5.6-luna", "provider": "custom"},
+            "auxiliary": {
+                "compression": {"provider": "custom", "model": "gpt-5.6-luna"},
+            },
+        })
+        requests = []
+        output_item = SimpleNamespace(
+            type="message",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="compressed summary")],
+        )
+
+        def create(**kwargs):
+            requests.append(kwargs)
+            return iter([
+                SimpleNamespace(type="response.created"),
+                SimpleNamespace(type="response.output_text.delta", delta="compressed summary"),
+                SimpleNamespace(type="response.output_item.done", item=output_item),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(id="response-1", status="completed", usage=None),
+                ),
+            ])
+
+        real_client = SimpleNamespace(
+            api_key="[REDACTED]",
+            base_url="https://tianji.example.test/v1",
+            responses=SimpleNamespace(create=create),
+        )
+        monkeypatch.setattr(auxiliary_client, "_create_openai_client", lambda **_kwargs: real_client)
+        auxiliary_client._client_cache.clear()
+
+        compressor = ContextCompressor(
+            model="gpt-5.6-luna",
+            provider="custom",
+            base_url="https://tianji.example.test/v1",
+            api_key="[REDACTED]",
+            api_mode="codex_responses",
+            threshold_percent=0.50,
+            protect_first_n=1,
+            protect_last_n=1,
+            config_context_length=1_000,
+            quiet_mode=True,
+            tail_mode="legacy",
+        )
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second question"},
+            {"role": "assistant", "content": "second answer"},
+            {"role": "user", "content": "third question"},
+            {"role": "assistant", "content": "third answer"},
+            {"role": "user", "content": "current question"},
+        ]
+
+        assert compressor.should_compress(900)
+        compressed = compressor.compress(messages, current_tokens=900)
+
+        assert compressor.compression_count == 1
+        assert len(requests) == 1
+        assert requests[0]["stream"] is True
+        assert requests[0]["model"] == "gpt-5.6-luna"
+        assert any("compressed summary" in message.get("content", "") for message in compressed)
+        assert compressor._last_summary_fallback_used is False
+        telemetry = compressor._last_compression_telemetry
+        assert telemetry is not None
+        assert telemetry["aux_provider"] == "custom"
+        assert telemetry["aux_model"] == "gpt-5.6-luna"
+        assert telemetry["time_to_first_progress_ms"] is not None
+        assert telemetry["failure_class"] is None
