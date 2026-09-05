@@ -401,6 +401,122 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert "my-gateway.example.com" in str(client.base_url)
         assert client.api_key == "***"
 
+    def test_custom_provider_main_runtime_preserves_responses_mode_for_compression(self, monkeypatch):
+        """An automatic compression override of ``provider: custom`` must retain
+        the live main runtime's wire mode.  The named Tianji provider resolves
+        to a bare ``custom`` runtime, so dropping ``api_mode`` here silently
+        sends the summary to ``/chat/completions`` instead of ``/responses``.
+        """
+        from agent.auxiliary_client import CodexAuxiliaryClient, resolve_provider_client
+
+        real_client = MagicMock()
+        real_client.api_key = "***"
+        real_client.base_url = "https://tianji.example.test/v1"
+        monkeypatch.setattr(
+            "agent.auxiliary_client._create_openai_client",
+            lambda **_kwargs: real_client,
+        )
+
+        client, model = resolve_provider_client(
+            "custom",
+            model="gpt-5.6-luna",
+            task="compression",
+            main_runtime={
+                "provider": "custom",
+                "model": "gpt-5.6-luna",
+                "base_url": "https://tianji.example.test/v1",
+                "api_key": "***",
+                "api_mode": "codex_responses",
+            },
+        )
+
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "gpt-5.6-luna"
+        assert client._real_client is real_client
+
+    def test_custom_provider_main_runtime_mode_separates_cached_transport(self, monkeypatch):
+        """Changing the inherited main-runtime wire mode must not reuse a cached adapter."""
+        from agent.auxiliary_client import CodexAuxiliaryClient, _client_cache, _get_cached_client
+
+        created_clients = []
+
+        def make_client(**kwargs):
+            client = MagicMock()
+            client.base_url = kwargs.get("base_url")
+            created_clients.append(client)
+            return client
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client._create_openai_client",
+            make_client,
+        )
+        _client_cache.clear()
+        runtime = {
+            "provider": "custom",
+            "model": "gpt-5.6-luna",
+            "base_url": "https://tianji.example.test/v1",
+            "api_key": "***",
+        }
+
+        responses_client, _ = _get_cached_client(
+            "custom", model="gpt-5.6-luna", task="compression",
+            main_runtime={**runtime, "api_mode": "codex_responses"},
+        )
+        chat_client, _ = _get_cached_client(
+            "custom", model="gpt-5.6-luna", task="compression",
+            main_runtime={**runtime, "api_mode": "chat_completions"},
+        )
+        other_client, _ = _get_cached_client(
+            "custom", model="gpt-5.6-luna", task="compression",
+            main_runtime={
+                **runtime,
+                "base_url": "https://other.tianji.example.test/v1",
+                "api_key": "***-other",
+                "api_mode": "chat_completions",
+            },
+        )
+
+        assert isinstance(responses_client, CodexAuxiliaryClient)
+        assert chat_client is created_clients[1]
+        assert chat_client is not responses_client
+        assert other_client is created_clients[2]
+        assert other_client is not chat_client
+
+    def test_custom_provider_inherited_mode_reaches_relay_metadata(self, monkeypatch):
+        """The inherited mode must reach Relay's protocol/codec selection."""
+        import agent.auxiliary_client as auxiliary_client
+
+        runtime = {
+            "provider": "custom",
+            "model": "gpt-5.6-luna",
+            "base_url": "https://tianji.example.test/v1",
+            "api_key": "***",
+            "api_mode": "codex_responses",
+        }
+        client = MagicMock()
+        client.base_url = runtime["base_url"]
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_resolve_task_provider_model",
+            lambda *args, **kwargs: ("custom", "gpt-5.6-luna", None, None, None),
+        )
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_get_cached_client",
+            lambda *args, **kwargs: (client, "gpt-5.6-luna"),
+        )
+        with patch.object(auxiliary_client, "_set_relay_auxiliary_route") as set_route:
+            auxiliary_client._prepare_aux_request(
+                "title_generation", provider=None, model=None, base_url=None, api_key=None,
+                main_runtime=runtime, messages=[{"role": "user", "content": "x"}],
+                temperature=None, max_tokens=None, tools=None, timeout=None, extra_body=None,
+                reasoning_config=None, extra_headers=None, api_mode=None, route_info={},
+                async_mode=False,
+            )
+
+        assert set_route.call_args.args[2] == "codex_responses"
+
+
     def test_custom_provider_main_runtime_no_credentials_falls_through(self, tmp_path, monkeypatch):
         """When main_runtime has no base_url or no api_key, the existing
         _try_custom_endpoint / _resolve_api_key_provider fallback chain is
@@ -424,11 +540,12 @@ class TestResolveProviderClientMainRuntimeCustom:
     def test_custom_provider_main_runtime_respects_explicit_base_url(self, tmp_path):
         """explicit_base_url still wins over main_runtime — the caller's
         explicit argument is the strongest signal."""
-        from agent.auxiliary_client import resolve_provider_client
+        from agent.auxiliary_client import resolve_provider_client, CodexAuxiliaryClient
         main_runtime = {
             "base_url": "https://main-runtime.example.com/v1",
             "api_key": "sk-main",
             "model": "ignored-model",
+            "api_mode": "codex_responses",
         }
         client, model = resolve_provider_client(
             "custom",
@@ -441,3 +558,84 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert model == "explicit-model"
         assert "explicit.example.com" in str(client.base_url)
         assert client.api_key == "sk-explicit"
+        assert not isinstance(client, CodexAuxiliaryClient)
+
+    def test_automatic_compression_inherited_custom_responses_dispatches_stream(self, tmp_path, monkeypatch):
+        """Automatic compression must reach the inherited custom Responses wire."""
+        from types import SimpleNamespace
+
+        import agent.auxiliary_client as auxiliary_client
+        from agent.context_compressor import ContextCompressor
+
+        _write_config(tmp_path, {
+            "model": {"default": "gpt-5.6-luna", "provider": "custom"},
+            "auxiliary": {
+                "compression": {"provider": "custom", "model": "gpt-5.6-luna"},
+            },
+        })
+        requests = []
+        output_item = SimpleNamespace(
+            type="message",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="compressed summary")],
+        )
+
+        def create(**kwargs):
+            requests.append(kwargs)
+            return iter([
+                SimpleNamespace(type="response.created"),
+                SimpleNamespace(type="response.output_text.delta", delta="compressed summary"),
+                SimpleNamespace(type="response.output_item.done", item=output_item),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(id="response-1", status="completed", usage=None),
+                ),
+            ])
+
+        real_client = SimpleNamespace(
+            api_key="[REDACTED]",
+            base_url="https://tianji.example.test/v1",
+            responses=SimpleNamespace(create=create),
+        )
+        monkeypatch.setattr(auxiliary_client, "_create_openai_client", lambda **_kwargs: real_client)
+        auxiliary_client._client_cache.clear()
+
+        compressor = ContextCompressor(
+            model="gpt-5.6-luna",
+            provider="custom",
+            base_url="https://tianji.example.test/v1",
+            api_key="[REDACTED]",
+            api_mode="codex_responses",
+            threshold_percent=0.50,
+            protect_first_n=1,
+            protect_last_n=1,
+            config_context_length=1_000,
+            quiet_mode=True,
+            tail_mode="legacy",
+        )
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second question"},
+            {"role": "assistant", "content": "second answer"},
+            {"role": "user", "content": "third question"},
+            {"role": "assistant", "content": "third answer"},
+            {"role": "user", "content": "current question"},
+        ]
+
+        assert compressor.should_compress(900)
+        compressed = compressor.compress(messages, current_tokens=900)
+
+        assert compressor.compression_count == 1
+        assert len(requests) == 1
+        assert requests[0]["stream"] is True
+        assert requests[0]["model"] == "gpt-5.6-luna"
+        assert any("compressed summary" in message.get("content", "") for message in compressed)
+        assert compressor._last_summary_fallback_used is False
+        telemetry = compressor._last_compression_telemetry
+        assert telemetry is not None
+        assert telemetry["aux_provider"] == "custom"
+        assert telemetry["aux_model"] == "gpt-5.6-luna"
+        assert telemetry["time_to_first_progress_ms"] is not None
+        assert telemetry["failure_class"] is None

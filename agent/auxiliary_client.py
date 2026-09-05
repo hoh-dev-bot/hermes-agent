@@ -4481,6 +4481,7 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
     # /anthropic base while the plain OpenAI client uses the /v1-rewritten custom_base (never
     # /anthropic/chat/completions). Empty means "use custom_base".
     custom_base = custom_key = wrap_base = ""
+    transport_req = req
     if req.explicit_base_url:
         custom_base = _to_openai_base_url(req.explicit_base_url).strip()
         if req.api_mode == "anthropic_messages":
@@ -4503,6 +4504,12 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
         _main_key = str(main_runtime.get("api_key") or "").strip()
         if _main_base and _main_key:
             custom_base, custom_key = _main_base, _main_key
+            if not req.api_mode:
+                runtime_api_mode = str(main_runtime.get("api_mode") or "").strip()
+                if runtime_api_mode:
+                    # Named custom runtimes are represented as bare ``custom`` here;
+                    # keep their resolved wire protocol for task-specific overrides.
+                    transport_req = req._replace(api_mode=runtime_api_mode)
     if custom_base and custom_key:
         final_model = _normalize_resolved_model(
             model or (main_runtime.get("model") if main_runtime else None) or "gpt-4o-mini", provider,
@@ -4515,7 +4522,7 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
         if _custom_headers:
             extra["default_headers"] = _custom_headers
         client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
-        client = _wrap_transport(req, client, final_model, wrap_base or custom_base, custom_key)
+        client = _wrap_transport(transport_req, client, final_model, wrap_base or custom_base, custom_key)
         return _route_client(req, client, final_model)
     # Try custom first, then API-key providers (Codex excluded here:
     # falling through to Codex with no model is a stale-constant trap).
@@ -5132,8 +5139,9 @@ def _client_cache_key(
     task: Optional[str] = None, model: Optional[str] = None,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
-    # `auto` resolves through the main runtime and task-specific policy, so both join the key.
-    runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    # `auto` and bare `custom` both resolve through the main runtime; all runtime identity fields
+    # must join the key so endpoint, credential, model, and wire-mode switches cannot reuse a client.
+    runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider in {"auto", "custom"} else ()
     task_key = (task or "", _task_prefers_fast_model(task)) if provider == "auto" else ""
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
     # Model MUST be in the key: concurrent calls to the same endpoint with different models would
@@ -6544,6 +6552,10 @@ def _prepare_aux_request(
     )
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
+    relay_api_mode = resolved_api_mode
+    if (not relay_api_mode and request_provider == "custom" and not resolved_base_url
+            and main_runtime.get("base_url") and main_runtime.get("api_key")):
+        relay_api_mode = str(main_runtime.get("api_mode") or "") or None
     fast_compression_cap = None
     if not async_mode:
         compression_config = _get_auxiliary_task_config("compression") if task == "compression" else {}
@@ -6553,7 +6565,7 @@ def _prepare_aux_request(
             leak_guard_config=compression_config, max_tokens=max_tokens,
             extra_body=effective_extra_body,
         )
-    _set_relay_auxiliary_route(request_provider, final_model, resolved_api_mode)
+    _set_relay_auxiliary_route(request_provider, final_model, relay_api_mode)
     _record_route_info(route_info, _fallback_provider_from_label(request_provider), final_model)
     if async_mode:
         base_info = str(getattr(client, "base_url", "") or "")
