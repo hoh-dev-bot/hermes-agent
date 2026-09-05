@@ -438,12 +438,17 @@ class TestResolveProviderClientMainRuntimeCustom:
         """Changing the inherited main-runtime wire mode must not reuse a cached adapter."""
         from agent.auxiliary_client import CodexAuxiliaryClient, _client_cache, _get_cached_client
 
-        real_client = MagicMock()
-        real_client.api_key = "***"
-        real_client.base_url = "https://tianji.example.test/v1"
+        created_clients = []
+
+        def make_client(**kwargs):
+            client = MagicMock()
+            client.base_url = kwargs.get("base_url")
+            created_clients.append(client)
+            return client
+
         monkeypatch.setattr(
             "agent.auxiliary_client._create_openai_client",
-            lambda **_kwargs: real_client,
+            make_client,
         )
         _client_cache.clear()
         runtime = {
@@ -461,10 +466,21 @@ class TestResolveProviderClientMainRuntimeCustom:
             "custom", model="gpt-5.6-luna", task="compression",
             main_runtime={**runtime, "api_mode": "chat_completions"},
         )
+        other_client, _ = _get_cached_client(
+            "custom", model="gpt-5.6-luna", task="compression",
+            main_runtime={
+                **runtime,
+                "base_url": "https://other.tianji.example.test/v1",
+                "api_key": "***-other",
+                "api_mode": "chat_completions",
+            },
+        )
 
         assert isinstance(responses_client, CodexAuxiliaryClient)
-        assert chat_client is real_client
+        assert chat_client is created_clients[1]
         assert chat_client is not responses_client
+        assert other_client is created_clients[2]
+        assert other_client is not chat_client
 
     def test_custom_provider_inherited_mode_reaches_relay_metadata(self, monkeypatch):
         """The inherited mode must reach Relay's protocol/codec selection."""
@@ -524,11 +540,12 @@ class TestResolveProviderClientMainRuntimeCustom:
     def test_custom_provider_main_runtime_respects_explicit_base_url(self, tmp_path):
         """explicit_base_url still wins over main_runtime — the caller's
         explicit argument is the strongest signal."""
-        from agent.auxiliary_client import resolve_provider_client
+        from agent.auxiliary_client import resolve_provider_client, CodexAuxiliaryClient
         main_runtime = {
             "base_url": "https://main-runtime.example.com/v1",
             "api_key": "sk-main",
             "model": "ignored-model",
+            "api_mode": "codex_responses",
         }
         client, model = resolve_provider_client(
             "custom",
@@ -541,3 +558,4 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert model == "explicit-model"
         assert "explicit.example.com" in str(client.base_url)
         assert client.api_key == "sk-explicit"
+        assert not isinstance(client, CodexAuxiliaryClient)

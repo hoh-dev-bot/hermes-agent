@@ -5139,18 +5139,16 @@ def _client_cache_key(
     task: Optional[str] = None, model: Optional[str] = None,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
-    # `auto` resolves through the main runtime and task-specific policy, so both join the key.
-    runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    # `auto` and bare `custom` both resolve through the main runtime; all runtime identity fields
+    # must join the key so endpoint, credential, model, and wire-mode switches cannot reuse a client.
+    runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider in {"auto", "custom"} else ()
     task_key = (task or "", _task_prefers_fast_model(task)) if provider == "auto" else ""
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
-    # Custom compression overrides inherit the main runtime's wire mode when no task mode is set;
-    # keep that mode in the key so a cached Responses adapter cannot serve a later chat request.
-    cache_api_mode = api_mode or (runtime.get("api_mode", "") if provider == "custom" else "")
     # Model MUST be in the key: concurrent calls to the same endpoint with different models would
     # share an entry, and the second builder's _store_cached_client would close the first's client.
     model_key = model or runtime.get("model", "")
     api_key_key = _runtime_cache_discriminator("api_key", api_key or "")
-    return (provider, async_mode, base_url or "", api_key_key, cache_api_mode, runtime_key, is_vision, task_key, pool_hint, model_key)
+    return (provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
 
 
 def _current_event_loop() -> Any:
@@ -6555,8 +6553,8 @@ def _prepare_aux_request(
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
     relay_api_mode = resolved_api_mode
-    if (not relay_api_mode and request_provider == "custom" and main_runtime.get("base_url")
-            and main_runtime.get("api_key")):
+    if (not relay_api_mode and request_provider == "custom" and not resolved_base_url
+            and main_runtime.get("base_url") and main_runtime.get("api_key")):
         relay_api_mode = str(main_runtime.get("api_mode") or "") or None
     fast_compression_cap = None
     if not async_mode:
